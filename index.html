@@ -1,3 +1,21 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>SQL Script Display</title>
+  <style>
+    pre {
+      background-color: #f4f4f4;
+      padding: 15px;
+      font-family: monospace;
+      border-left: 4px solid #ccc;
+      white-space: pre-wrap; /* This makes long lines wrap within the pre block */
+      word-wrap: break-word;
+      overflow-x: auto;
+    }
+  </style>
+</head>
+<body>
+  <pre>
 -- 1. create tale and input data ---- rows before cleaning 418 rows after cleaning 373
 CREATE TABLE cirrhosis_raw (
     ID VARCHAR(10),
@@ -199,3 +217,6 @@ SELECT COUNT(*) AS outlier_count FROM outliers;  -- Check how many
 
 -- Final ML-ready data, excludes outliers
 SELECT COUNT(*) AS ml_ready_rows FROM cirrhosis_normalized WHERE ID NOT IN (SELECT ID FROM outliers); 
+</pre>
+</body>
+</html>
