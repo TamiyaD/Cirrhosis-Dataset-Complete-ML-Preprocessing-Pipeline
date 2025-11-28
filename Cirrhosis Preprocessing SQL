@@ -1,0 +1,202 @@
+-- 1. create tale and input data ---- rows before cleaning 418 rows after cleaning 373
+CREATE TABLE cirrhosis_raw (
+    ID VARCHAR(10),
+    N_Days VARCHAR(10), 
+    Status VARCHAR(20),
+    Drug VARCHAR(20),
+    Age VARCHAR(10),
+    Sex VARCHAR(5),  
+    Ascites VARCHAR(10),
+    Hepatomegaly VARCHAR(10),
+    Spiders VARCHAR(10),
+    Edema VARCHAR(20),
+    Bilirubin VARCHAR(10),
+    Cholesterol VARCHAR(10), 
+    Albumin VARCHAR(10),
+    Copper VARCHAR(10),
+    Alk_Phos VARCHAR(15),
+    SGOT VARCHAR(15),
+    Triglycerides VARCHAR(10), 
+    Platelets VARCHAR(10), 
+    Prothrombin VARCHAR(10),
+    Stage VARCHAR(10)
+);
+
+LOAD DATA INFILE "cirrhosis.csv" INTO TABLE cirrhosis_raw
+FIELDS TERMINATED BY ',' 
+ENCLOSED BY '"'
+LINES TERMINATED BY '\n'
+IGNORE 1 LINES;
+
+SET SQL_SAFE_UPDATES = 0; 
+
+-- load: 418 rows 
+SELECT COUNT(*) AS raw_rows FROM cirrhosis_raw; 
+
+-- 2. Create Cleaned Table and change back to proper types
+-- Convert Na to non participant and days to years
+CREATE TABLE cirrhosis_cleaned AS
+SELECT 
+    CAST(ID AS UNSIGNED) AS ID,
+    CAST(N_Days AS UNSIGNED) AS N_Days,
+    Status,
+    CASE WHEN Drug = 'NA' THEN 'Non Participant' ELSE Drug END AS Drug,
+    CAST(Age AS DECIMAL(10,2)) / 365.25 AS Age,  
+    Sex,
+    Ascites, Hepatomegaly, Spiders, Edema,
+    CAST(Bilirubin AS DECIMAL(10,2)) AS Bilirubin,
+    CAST(NULLIF(Cholesterol, 'NA') AS UNSIGNED) AS Cholesterol,
+    CAST(NULLIF(Albumin, 'NA') AS DECIMAL(10,2)) AS Albumin,
+    CAST(NULLIF(Copper, 'NA') AS UNSIGNED) AS Copper,
+    CAST(NULLIF(Alk_Phos, 'NA') AS DECIMAL(10,2)) AS Alk_Phos,
+    CAST(NULLIF(SGOT, 'NA') AS DECIMAL(10,2)) AS SGOT,
+    CAST(NULLIF(Triglycerides, 'NA') AS UNSIGNED) AS Triglycerides,
+    CAST(NULLIF(Platelets, 'NA') AS UNSIGNED) AS Platelets,
+    CAST(NULLIF(Prothrombin, 'NA') AS DECIMAL(10,2)) AS Prothrombin,
+    CASE WHEN CAST(NULLIF(Stage, 'NA') AS UNSIGNED) IN (1,2) THEN 'N' ELSE 'Y' END AS Stage_Presence
+FROM cirrhosis_raw
+;
+
+ALTER TABLE cirrhosis_cleaned 
+ADD PRIMARY KEY (ID),
+MODIFY COLUMN N_Days INT,
+MODIFY COLUMN Age DECIMAL(10,2)
+;
+
+SELECT COUNT(*) AS cleaned_rows FROM cirrhosis_cleaned;  -- Expect ~373 [web:11]
+
+-- 3. Check for DUPLICATES 
+SELECT COUNT(*) AS duplicates 
+FROM (SELECT ID, COUNT(*) FROM cirrhosis_cleaned GROUP BY ID HAVING COUNT(*) > 1) d
+; 
+
+-- 4.refill categorical NA values using mode -- Ascites, Hepatomegaly, Spiders, Edema (single CTE, reusable)
+WITH mode_values AS (
+    SELECT 
+        -- Ascites mode
+        (SELECT value FROM (
+            SELECT Ascites AS value, COUNT(*) AS cnt
+            FROM cirrhosis_cleaned WHERE Ascites IS NOT NULL AND Ascites != 'NA'
+            GROUP BY Ascites ORDER BY cnt DESC LIMIT 1
+        ) m1) AS mode_ascites,
+        -- Hepatomegaly mode
+        (SELECT value FROM (
+            SELECT Hepatomegaly AS value, COUNT(*) AS cnt
+            FROM cirrhosis_cleaned WHERE Hepatomegaly IS NOT NULL AND Hepatomegaly != 'NA'
+            GROUP BY Hepatomegaly ORDER BY cnt DESC LIMIT 1
+        ) m2) AS mode_hepatomegaly,
+        -- Spiders mode  
+        (SELECT value FROM (
+            SELECT Spiders AS value, COUNT(*) AS cnt
+            FROM cirrhosis_cleaned WHERE Spiders IS NOT NULL AND Spiders != 'NA'
+            GROUP BY Spiders ORDER BY cnt DESC LIMIT 1
+        ) m3) AS mode_spiders,
+        -- Edema mode
+        (SELECT value FROM (
+            SELECT Edema AS value, COUNT(*) AS cnt
+            FROM cirrhosis_cleaned WHERE Edema IS NOT NULL AND Edema != 'NA'
+            GROUP BY Edema ORDER BY cnt DESC LIMIT 1
+        ) m4) AS mode_edema
+)
+UPDATE cirrhosis_cleaned c1 
+CROSS JOIN mode_values m
+SET 
+    c1.Ascites = COALESCE(NULLIF(c1.Ascites, 'NA'), m.mode_ascites),
+    c1.Hepatomegaly = COALESCE(NULLIF(c1.Hepatomegaly, 'NA'), m.mode_hepatomegaly),
+    c1.Spiders = COALESCE(NULLIF(c1.Spiders, 'NA'), m.mode_spiders),
+    c1.Edema = COALESCE(NULLIF(c1.Edema, 'NA'), m.mode_edema)
+WHERE c1.Ascites = 'NA' OR c1.Hepatomegaly = 'NA' OR c1.Spiders = 'NA' OR c1.Edema = 'NA'
+;
+
+-- 5. Refill Numerical With Per-column Median, Used Window Function
+UPDATE cirrhosis_cleaned c
+SET 
+    Cholesterol = COALESCE(c.Cholesterol, (
+        SELECT AVG(val) FROM (
+            SELECT Cholesterol AS val,
+                   ROW_NUMBER() OVER (ORDER BY Cholesterol) as rn,
+                   COUNT(*) OVER() as total
+            FROM cirrhosis_cleaned WHERE Cholesterol IS NOT NULL
+        ) m WHERE rn IN (FLOOR((total+1)/2), CEIL((total+1)/2))
+    )),
+    Copper = COALESCE(c.Copper, (
+        SELECT AVG(val) FROM (
+            SELECT Copper AS val,
+                   ROW_NUMBER() OVER (ORDER BY Copper) as rn,
+                   COUNT(*) OVER() as total
+            FROM cirrhosis_cleaned WHERE Copper IS NOT NULL
+        ) m WHERE rn IN (FLOOR((total+1)/2), CEIL((total+1)/2))
+    )),
+    Alk_Phos = COALESCE(c.Alk_Phos, (
+        SELECT AVG(Alk_Phos) FROM (
+            SELECT Alk_Phos, ROW_NUMBER() OVER (ORDER BY Alk_Phos) rn
+            FROM cirrhosis_cleaned WHERE Alk_Phos IS NOT NULL
+        ) m WHERE rn = (SELECT CEIL(COUNT(*)/2.0) FROM cirrhosis_cleaned WHERE Alk_Phos IS NOT NULL)
+    )),
+    SGOT = COALESCE(c.SGOT, (
+        SELECT AVG(SGOT) FROM (
+            SELECT SGOT, ROW_NUMBER() OVER (ORDER BY SGOT) rn
+            FROM cirrhosis_cleaned WHERE SGOT IS NOT NULL
+        ) m WHERE rn = (SELECT CEIL(COUNT(*)/2.0) FROM cirrhosis_cleaned WHERE SGOT IS NOT NULL)
+    )),
+    -- Repeated for Triglycerides, Platelets, Prothrombin
+    Triglycerides = COALESCE(c.Triglycerides, (SELECT AVG(Triglycerides) FROM cirrhosis_cleaned WHERE Triglycerides IS NOT NULL)),
+    Platelets = COALESCE(c.Platelets, (SELECT AVG(Platelets) FROM cirrhosis_cleaned WHERE Platelets IS NOT NULL)),
+    Prothrombin = COALESCE(c.Prothrombin, (SELECT AVG(Prothrombin) FROM cirrhosis_cleaned WHERE Prothrombin IS NOT NULL))
+WHERE c.Cholesterol IS NULL OR c.Copper IS NULL OR c.Alk_Phos IS NULL 
+   OR c.SGOT IS NULL OR c.Triglycerides IS NULL OR c.Platelets IS NULL OR c.Prothrombin IS NULL; 
+
+-- 6. NORMALIZED TABLE WITH Z-SCORES (CTE)
+DROP TABLE IF EXISTS cirrhosis_normalized;
+CREATE TABLE cirrhosis_normalized AS
+WITH stats AS (
+    SELECT 
+        AVG(Alk_Phos) mean_Alk_Phos, STDDEV(Alk_Phos) std_Alk_Phos,
+        AVG(SGOT) mean_SGOT, STDDEV(SGOT) std_SGOT,
+        AVG(Cholesterol) mean_Cholesterol, STDDEV(Cholesterol) std_Cholesterol,
+        AVG(Copper) mean_Copper, STDDEV(Copper) std_Copper,
+        AVG(Triglycerides) mean_Triglycerides, STDDEV(Triglycerides) std_Triglycerides,
+        AVG(Platelets) mean_Platelets, STDDEV(Platelets) std_Platelets,
+        AVG(Prothrombin) mean_Prothrombin, STDDEV(Prothrombin) std_Prothrombin
+    FROM cirrhosis_cleaned
+)
+SELECT 
+    c.*,
+    (Alk_Phos - s.mean_Alk_Phos) / NULLIF(s.std_Alk_Phos, 0) AS z_Alk_Phos,
+    (SGOT - s.mean_SGOT) / NULLIF(s.std_SGOT, 0) AS z_SGOT,
+    (Cholesterol - s.mean_Cholesterol) / NULLIF(s.std_Cholesterol, 0) AS z_Cholesterol,
+    (Copper - s.mean_Copper) / NULLIF(s.std_Copper, 0) AS z_Copper,
+    (Triglycerides - s.mean_Triglycerides) / NULLIF(s.std_Triglycerides, 0) AS z_Triglycerides,
+    (Platelets - s.mean_Platelets) / NULLIF(s.std_Platelets, 0) AS z_Platelets,
+    (Prothrombin - s.mean_Prothrombin) / NULLIF(s.std_Prothrombin, 0) AS z_Prothrombin
+FROM cirrhosis_cleaned c CROSS JOIN stats s;  -- [web:12]
+
+-- 7.Outliers Handling (View for ML-ready data)
+DROP VIEW IF EXISTS cirrhosis_ml_ready;
+CREATE VIEW cirrhosis_ml_ready AS
+WITH outlier_stats AS (
+    SELECT 
+        AVG(Alk_Phos) m_alk, STDDEV(Alk_Phos) sd_alk,
+        AVG(SGOT) m_sgot, STDDEV(SGOT) sd_sgot,
+        AVG(Cholesterol) m_chol, STDDEV(Cholesterol) sd_chol,
+        AVG(Copper) m_copper, STDDEV(Copper) sd_copper,
+        AVG(Triglycerides) m_trig, STDDEV(Triglycerides) sd_trig,
+        AVG(Platelets) m_plat, STDDEV(Platelets) sd_plat,
+        AVG(Prothrombin) m_proth, STDDEV(Prothrombin) sd_proth
+    FROM cirrhosis_cleaned
+),
+outliers AS (
+    SELECT ID FROM cirrhosis_normalized n CROSS JOIN outlier_stats o
+    WHERE ABS((Alk_Phos - m_alk)/sd_alk) > 3
+       OR ABS((SGOT - m_sgot)/sd_sgot) > 3
+       OR ABS((Cholesterol - m_chol)/sd_chol) > 3
+       OR ABS((Copper - m_copper)/sd_copper) > 3
+       OR ABS((Triglycerides - m_trig)/sd_trig) > 3
+       OR ABS((Platelets - m_plat)/sd_plat) > 3
+       OR ABS((Prothrombin - m_proth)/sd_proth) > 3
+)
+SELECT COUNT(*) AS outlier_count FROM outliers;  -- Check how many
+
+-- Final ML-ready data, excludes outliers
+SELECT COUNT(*) AS ml_ready_rows FROM cirrhosis_normalized WHERE ID NOT IN (SELECT ID FROM outliers); 
+
